@@ -1,0 +1,211 @@
+---
+AWSTemplateFormatVersion: 2010-09-09
+Description: Spoke VPC for TGW integration
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: Template Version
+        Parameters:
+          - pTemplateVersion
+      - Label:
+          default: VPC Config
+        Parameters:
+          - pVPCName
+          - pVPCCidr
+          - pVPCTenancy
+          - pNumberOfAzs
+          - pTgwId
+      - Label:
+          default: Tagging
+        Parameters:
+          - pEnvironment
+    ParameterLabels:
+      pVPCName:
+        default: Name of VPC
+      pVPCCidr:
+        default: VPC CIDR Block
+      pVPCTenancy:
+        default: Instance Tenancy
+      pEnvironment:
+        default: Environment
+      pTemplateVersion:
+        default: CloudFormation Template Version
+      pNumberOfAzs:
+        default: Number of AZs to use
+      pTgwId:
+        default: Transit Gateway ID
+
+Parameters:
+
+  pVPCCidr:
+    Default: 192.168.0.0/16
+    Description: CIDR block for VPC. Example 10.0.0.0/16
+    Type: String
+    AllowedPattern: "(\\d{1,3})\\.(\\d{1,3})\\.(\\d{1,3})\\.(\\d{1,3})/(\\d{1,2})"
+    ConstraintDescription: must be a valid IP CIDR range of the form x.x.x.x/x.
+
+  pVPCName:
+    Description: VPC name used for reference
+    Type: String
+
+  pVPCTenancy:
+    AllowedValues:
+      - default
+      - dedicated
+    Default: default
+    Description: Instance tenancy behavior for this VPC
+    Type: String
+
+  pEnvironment:
+    Type: String
+    Description: value for tag Environment. Values can be Production, Development, QA, or Staging
+    AllowedValues:
+      - "Production"
+      - "Development"
+      - "QA"
+      - "Staging"
+      - "Management"
+
+  pTemplateVersion:
+    Type: String
+    Default: "1.0.0"
+    AllowedValues:
+      - "1.0.0"
+    ConstraintDescription: Do not change
+
+  pNumberOfAzs:
+    Type: String
+    Default: "3"
+    AllowedValues:
+      - "2"
+      - "3"
+
+  pTgwId:
+    Type: String
+    Description: The ID of the transit gateway.
+
+Conditions:
+  3AZDeployment: !Equals [!Ref pNumberOfAzs, "3"]
+
+Resources:
+  rVpc:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: !Ref pVPCCidr
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      InstanceTenancy: !Ref pVPCTenancy
+      Tags:
+      - Key: Name
+        Value: !Ref pVPCName
+
+  rRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref rVpc
+      Tags:
+      - Key: Name
+        Value: !Sub ${pVPCName}-RouteTable
+
+  rSubnetA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      AvailabilityZone: !Select [0, !GetAZs ""]
+      VpcId: !Ref rVpc
+      CidrBlock: !Select [0, !Cidr [!Ref pVPCCidr, 6, 13]]
+      Tags:
+        - Key: Name
+          Value: !Sub ${pVPCName}-Subnet-A
+        - Key: Environment
+          Value: !Ref pEnvironment
+        - Key: "Template Version"
+          Value: !Ref pTemplateVersion
+
+  rAttachrSubnetA:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref rRouteTable
+      SubnetId: !Ref rSubnetA
+
+  rSubnetB:
+    Type: AWS::EC2::Subnet
+    Properties:
+      AvailabilityZone: !Select [1, !GetAZs ""]
+      VpcId: !Ref rVpc
+      CidrBlock: !Select [1, !Cidr [!Ref pVPCCidr, 6, 13]]
+      Tags:
+      - Key: Name
+        Value: !Sub ${pVPCName}-Subnet-B
+  rAttachSubnetB:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref rRouteTable
+      SubnetId: !Ref rSubnetB
+
+  rSubnetC:
+    Type: AWS::EC2::Subnet
+    Condition: 3AZDeployment
+    Properties:
+      AvailabilityZone: !Select [2, !GetAZs ""]
+      VpcId: !Ref rVpc
+      CidrBlock: !Select [2, !Cidr [!Ref pVPCCidr, 6, 13]]
+      Tags:
+      - Key: Name
+        Value: !Sub ${pVPCName}-Subnet-C
+  rAttachSubnetC:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Condition: 3AZDeployment
+    Properties:
+      RouteTableId: !Ref rRouteTable
+      SubnetId: !Ref rSubnetC
+
+  rTgwAttachment:
+    Type: AWS::EC2::TransitGatewayAttachment
+    Properties:
+      TransitGatewayId: !Ref pTgwId
+      VpcId: !Ref rVpc
+      SubnetIds:
+        - !Ref rSubnetA
+        - !Ref rSubnetB
+        - !If [3AZDeployment ,!Ref rSubnetC, !Ref "AWS::NoValue"]
+
+  ## RDS Subnet Group staged in the 2 created Subnets
+  rRDSSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupName: !Sub DBSubnetGroup-${pVPCName}
+      DBSubnetGroupDescription: RDS Subnet Group
+      SubnetIds:
+      - !Ref rSubnetA
+      - !Ref rSubnetB
+      - !If [3AZDeployment ,!Ref rSubnetC, !Ref "AWS::NoValue"]
+      Tags:
+      - Key: Name
+        Value: !Sub DBSubnetGroup-${pVPCName}
+
+  ## Route for Transit Gateway
+  rRoute0:
+    Type: AWS::EC2::Route
+    DependsOn: rTgwAttachment
+    Properties:
+      DestinationCidrBlock: 0.0.0.0/0
+      TransitGatewayId: !Ref pTgwId
+      RouteTableId: !Ref rRouteTable
+
+Outputs:
+  oVpc:
+    Description: VPC ID
+    Value: !Ref rVpc
+  oRouteTable:
+    Value: !Ref rRouteTable
+  oSubnetA:
+    Value: !Ref rSubnetA
+  oSubnetB:
+    Value: !Ref rSubnetB
+  oSubnetC:
+    Value: !If [3AZDeployment , !Ref rSubnetC, "Unused"]
+  oRDSSubnetGroup:
+    Description: RDSSubnetGroup
+    Value: !Ref rRDSSubnetGroup
